@@ -203,6 +203,11 @@ ScholarPay targets a massive, underserved, globally relatable problem — educat
 
 ---
 
+## contracts
+
+https://stellar.expert/explorer/testnet/tx/1b9a54974c38ddc0944e76180f966d4c94b1130f1c1ac635ec1316d147d3b7b0
+https://lab.stellar.org/r/testnet/contract/CA2EY3LL6EI3ARMSRPSIUDG5K5YFS6T5367Z46OAP6FIHJFYDX5H6JUU
+
 ## License
 
 MIT — see [LICENSE](./LICENSE)

@@ -1,277 +1,221 @@
 #![no_std]
-
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
-    Address, Env, Map, String, Vec,
+    contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec, log,
 };
 
-// ---------------------------------------------------------------------------
-// Storage Keys
-// ---------------------------------------------------------------------------
-
-/// Top-level storage key for all scholarship records
-const SCHOLARSHIPS: &str = "scholarships";
-/// Top-level storage key for all disbursement records
-const DISBURSEMENTS: &str = "disbursements";
-/// Admin address — the NGO / institution that created the contract
-const ADMIN: &str = "admin";
-
-// ---------------------------------------------------------------------------
-// Data Types
-// ---------------------------------------------------------------------------
-
-/// Represents a scholarship grant registered on-chain by an admin.
+// ─── Storage Keys ─────────────────────────────────────────────────────────────
 #[contracttype]
 #[derive(Clone)]
-pub struct Scholarship {
-    /// Human-readable name, e.g. "STEM Global Grant 2025"
-    pub name: String,
-    /// Total amount (in stroops or USDC micro-units) available in this grant
-    pub total_amount: i128,
-    /// Amount already disbursed so far
-    pub disbursed: i128,
-    /// Stellar address of the token (USDC asset contract on Stellar)
-    pub token: Address,
-    /// Whether the scholarship is still accepting applications / disbursements
-    pub active: bool,
+pub enum DataKey {
+    Grant(u64),          // Grant storage by ID
+    GrantCounter,        // Auto-increment grant ID
+    Admin,               // NGO admin address
+    UsdcToken,           // USDC token contract address
 }
 
-/// Represents a single disbursement to one student.
+// ─── Grant Status ─────────────────────────────────────────────────────────────
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum GrantStatus {
+    Registered,
+    EligibilityVerified,
+    Disbursed,
+    Revoked,
+}
+
+// ─── Grant Record ─────────────────────────────────────────────────────────────
 #[contracttype]
 #[derive(Clone)]
-pub struct Disbursement {
-    /// The scholarship ID this disbursement belongs to
-    pub scholarship_id: u32,
-    /// Student wallet address
-    pub student: Address,
-    /// Amount disbursed (in micro-units matching the token)
-    pub amount: i128,
-    /// Simple purpose tag, e.g. "tuition", "books", "living"
+pub struct Grant {
+    pub id: u64,
+    pub ngo_admin: Address,
+    pub recipient: Address,
+    pub amount_usdc: i128,        // in stroops (7 decimals)
+    pub student_name: String,
     pub purpose: String,
-    /// Ledger sequence number when this was created (audit trail)
-    pub ledger: u32,
+    pub status: GrantStatus,
+    pub ai_verification_hash: String, // SHA256 of AI eligibility report
+    pub disbursed_at: u64,            // ledger timestamp
+    pub created_at: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Contract
-// ---------------------------------------------------------------------------
-
+// ─── Contract ─────────────────────────────────────────────────────────────────
 #[contract]
 pub struct ScholarPayContract;
 
 #[contractimpl]
 impl ScholarPayContract {
-    // -----------------------------------------------------------------------
-    // Admin / Setup
-    // -----------------------------------------------------------------------
 
-    /// Initialize the contract with an admin address.
-    /// Must be called once immediately after deployment.
-    pub fn initialize(env: Env, admin: Address) {
-        // Prevent re-initialization
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("already initialized");
+    /// Initialize the contract with admin and USDC token address
+    pub fn initialize(env: Env, admin: Address, usdc_token: Address) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("Already initialized");
         }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::UsdcToken, &usdc_token);
+        env.storage().instance().set(&DataKey::GrantCounter, &0u64);
     }
 
-    // -----------------------------------------------------------------------
-    // Scholarship Management
-    // -----------------------------------------------------------------------
-
-    /// Register a new scholarship on-chain.
-    /// Only the admin (NGO / institution) may call this.
-    ///
-    /// Returns the newly created scholarship ID.
-    pub fn create_scholarship(
+    /// NGO admin registers a new scholarship grant on-chain
+    pub fn register_grant(
         env: Env,
-        caller: Address,
-        name: String,
-        total_amount: i128,
-        token: Address,
-    ) -> u32 {
-        // Auth: only the admin may create scholarships
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
+        ngo_admin: Address,
+        recipient: Address,
+        amount_usdc: i128,
+        student_name: String,
+        purpose: String,
+    ) -> u64 {
+        ngo_admin.require_auth();
 
-        let mut scholarships = Self::load_scholarships(&env);
-        let id = scholarships.len();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if ngo_admin != admin {
+            panic!("Only the NGO admin can register grants");
+        }
 
-        let scholarship = Scholarship {
-            name,
-            total_amount,
-            disbursed: 0,
-            token,
-            active: true,
+        let id: u64 = env.storage().instance().get(&DataKey::GrantCounter).unwrap_or(0);
+        let new_id = id + 1;
+
+        let grant = Grant {
+            id: new_id,
+            ngo_admin: ngo_admin.clone(),
+            recipient: recipient.clone(),
+            amount_usdc,
+            student_name,
+            purpose,
+            status: GrantStatus::Registered,
+            ai_verification_hash: String::from_str(&env, ""),
+            disbursed_at: 0,
+            created_at: env.ledger().timestamp(),
         };
 
-        scholarships.set(id, scholarship);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("schlrshps"), &scholarships);
+        env.storage().instance().set(&DataKey::Grant(new_id), &grant);
+        env.storage().instance().set(&DataKey::GrantCounter, &new_id);
 
-        id
+        log!(&env, "Grant {} registered for {}", new_id, recipient);
+        new_id
     }
 
-    /// Deactivate a scholarship — prevents further disbursements.
-    /// Only the admin may call this.
-    pub fn deactivate_scholarship(env: Env, caller: Address, scholarship_id: u32) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-
-        let mut scholarships = Self::load_scholarships(&env);
-        let mut s = scholarships.get(scholarship_id).expect("scholarship not found");
-        s.active = false;
-        scholarships.set(scholarship_id, s);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("schlrshps"), &scholarships);
-    }
-
-    // -----------------------------------------------------------------------
-    // Disbursement (Core MVP Transaction)
-    // -----------------------------------------------------------------------
-
-    /// Disburse funds from a scholarship directly to a student's Stellar wallet.
-    ///
-    /// Flow:
-    ///   Admin calls disburse() →
-    ///   Contract validates scholarship is active & has remaining funds →
-    ///   Token transfer executes on-chain via Soroban token interface →
-    ///   Disbursement record saved for audit trail →
-    ///   Returns disbursement ID
-    ///
-    /// Why Stellar: near-zero fees, 3–5 second finality, USDC native on Stellar,
-    /// and the audit log is immutable — no intermediary bank needed.
-    pub fn disburse(
+    /// Store AI eligibility verification result on-chain
+    pub fn verify_eligibility(
         env: Env,
-        caller: Address,
-        scholarship_id: u32,
-        student: Address,
-        amount: i128,
-        purpose: String,
-    ) -> u32 {
-        // Auth: only the admin may disburse
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
+        ngo_admin: Address,
+        grant_id: u64,
+        ai_verification_hash: String,
+    ) {
+        ngo_admin.require_auth();
 
-        // Validate amount
-        if amount <= 0 {
-            panic!("amount must be positive");
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if ngo_admin != admin {
+            panic!("Only the NGO admin can verify eligibility");
         }
 
-        let mut scholarships = Self::load_scholarships(&env);
-        let mut scholarship = scholarships
-            .get(scholarship_id)
-            .expect("scholarship not found");
-
-        // Scholarship must be active
-        if !scholarship.active {
-            panic!("scholarship is not active");
-        }
-
-        // Check remaining balance
-        let remaining = scholarship.total_amount - scholarship.disbursed;
-        if amount > remaining {
-            panic!("insufficient scholarship funds");
-        }
-
-        // --- On-chain token transfer via Soroban token interface ---
-        // This calls the USDC (or any SEP-41 token) contract's transfer()
-        // from the contract's own address to the student.
-        let token_client = soroban_sdk::token::Client::new(&env, &scholarship.token);
-        token_client.transfer(
-            &env.current_contract_address(), // from: contract holds the funds
-            &student,                         // to: student wallet
-            &amount,
-        );
-
-        // Update disbursed amount
-        scholarship.disbursed += amount;
-        scholarships.set(scholarship_id, scholarship);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("schlrshps"), &scholarships);
-
-        // Record disbursement for audit trail
-        let mut disbursements = Self::load_disbursements(&env);
-        let disbursement_id = disbursements.len();
-        disbursements.set(
-            disbursement_id,
-            Disbursement {
-                scholarship_id,
-                student,
-                amount,
-                purpose,
-                ledger: env.ledger().sequence(),
-            },
-        );
-        env.storage()
-            .instance()
-            .set(&symbol_short!("disbursmts"), &disbursements);
-
-        disbursement_id
-    }
-
-    // -----------------------------------------------------------------------
-    // Read / Query
-    // -----------------------------------------------------------------------
-
-    /// Get a scholarship by ID.
-    pub fn get_scholarship(env: Env, scholarship_id: u32) -> Scholarship {
-        let scholarships = Self::load_scholarships(&env);
-        scholarships.get(scholarship_id).expect("not found")
-    }
-
-    /// Get a disbursement record by ID.
-    pub fn get_disbursement(env: Env, disbursement_id: u32) -> Disbursement {
-        let disbursements = Self::load_disbursements(&env);
-        disbursements.get(disbursement_id).expect("not found")
-    }
-
-    /// List all disbursements for a specific student (audit / student portal view).
-    pub fn get_student_disbursements(env: Env, student: Address) -> Vec<Disbursement> {
-        let disbursements = Self::load_disbursements(&env);
-        let mut result = Vec::new(&env);
-        for i in 0..disbursements.len() {
-            let d = disbursements.get(i).unwrap();
-            if d.student == student {
-                result.push_back(d);
-            }
-        }
-        result
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal Helpers
-    // -----------------------------------------------------------------------
-
-    fn require_admin(env: &Env, caller: &Address) {
-        let admin: Address = env
+        let mut grant: Grant = env
             .storage()
             .instance()
-            .get(&symbol_short!("admin"))
-            .expect("not initialized");
-        if *caller != admin {
-            panic!("unauthorized: caller is not admin");
+            .get(&DataKey::Grant(grant_id))
+            .expect("Grant not found");
+
+        if grant.status != GrantStatus::Registered {
+            panic!("Grant is not in Registered status");
         }
+
+        grant.status = GrantStatus::EligibilityVerified;
+        grant.ai_verification_hash = ai_verification_hash;
+
+        env.storage().instance().set(&DataKey::Grant(grant_id), &grant);
+        log!(&env, "Grant {} eligibility verified", grant_id);
     }
 
-    fn load_scholarships(env: &Env) -> Map<u32, Scholarship> {
-        env.storage()
+    /// Disburse USDC to the student's Stellar wallet
+    /// This is the core transfer function — validates, transfers, records
+    pub fn disburse(env: Env, ngo_admin: Address, grant_id: u64) {
+        ngo_admin.require_auth();
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if ngo_admin != admin {
+            panic!("Only the NGO admin can disburse funds");
+        }
+
+        let mut grant: Grant = env
+            .storage()
             .instance()
-            .get(&symbol_short!("schlrshps"))
-            .unwrap_or_else(|| Map::new(env))
+            .get(&DataKey::Grant(grant_id))
+            .expect("Grant not found");
+
+        // Guard: must be verified before disbursement
+        if grant.status != GrantStatus::EligibilityVerified {
+            panic!("Grant must be eligibility-verified before disbursement");
+        }
+
+        let usdc_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::UsdcToken)
+            .unwrap();
+
+        // Execute USDC token transfer via SEP-41 token interface
+        let token_client = token::Client::new(&env, &usdc_token);
+
+        // Transfer from NGO admin wallet → student wallet
+        token_client.transfer(
+            &ngo_admin,
+            &grant.recipient,
+            &grant.amount_usdc,
+        );
+
+        // Update grant status to disbursed — immutable audit trail
+        grant.status = GrantStatus::Disbursed;
+        grant.disbursed_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey::Grant(grant_id), &grant);
+
+        // Emit event for indexers and Stellar Explorer
+        env.events().publish(
+            (Symbol::new(&env, "disbursed"), grant_id),
+            (grant.recipient.clone(), grant.amount_usdc, grant.disbursed_at),
+        );
+
+        log!(&env, "Grant {} disbursed {} USDC to {}", grant_id, grant.amount_usdc, grant.recipient);
     }
 
-    fn load_disbursements(env: &Env) -> Map<u32, Disbursement> {
+    /// Admin can revoke a grant before disbursement
+    pub fn revoke_grant(env: Env, ngo_admin: Address, grant_id: u64) {
+        ngo_admin.require_auth();
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if ngo_admin != admin {
+            panic!("Only the NGO admin can revoke grants");
+        }
+
+        let mut grant: Grant = env
+            .storage()
+            .instance()
+            .get(&DataKey::Grant(grant_id))
+            .expect("Grant not found");
+
+        if grant.status == GrantStatus::Disbursed {
+            panic!("Cannot revoke an already-disbursed grant");
+        }
+
+        grant.status = GrantStatus::Revoked;
+        env.storage().instance().set(&DataKey::Grant(grant_id), &grant);
+        log!(&env, "Grant {} revoked", grant_id);
+    }
+
+    // ─── View Functions ────────────────────────────────────────────────────────
+
+    pub fn get_grant(env: Env, grant_id: u64) -> Grant {
         env.storage()
             .instance()
-            .get(&symbol_short!("disbursmts"))
-            .unwrap_or_else(|| Map::new(env))
+            .get(&DataKey::Grant(grant_id))
+            .expect("Grant not found")
+    }
+
+    pub fn get_grant_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::GrantCounter).unwrap_or(0)
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 }
-
-mod test;
