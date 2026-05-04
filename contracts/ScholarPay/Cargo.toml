@@ -1,0 +1,29 @@
+[package]
+name = "scholar_pay"
+version = "0.1.0"
+edition = "2021"
+description = "On-chain scholarship disbursement via Stellar Soroban"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = "21.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+
+# ── Wasm-optimized release profile ──────────────────────────────────────────
+[profile.release]
+opt-level = "z"        # Optimize for binary size (critical for Wasm)
+overflow-checks = true  # Keep safety checks even in release
+debug = false
+strip = "symbols"
+lto = true
+codegen-units = 1
+panic = "abort"        # Smaller Wasm — no unwinding runtime needed
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
