@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Dashboard — ScholarPay</title>
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+</head>
+<body>
+<div id="app"><div style="display:flex;align-items:center;justify-content:center;height:100vh"><div class="spinner"></div></div></div>
+<script type="module">
+import { requireLogin, getUser, apiFetch, formatUSDC, formatDate, statusBadge, txHashChip, stellarChip, showFlash } from '/assets/js/app.js';
+import { pageShell } from '/assets/js/layout.js';
+
+if (!requireLogin()) throw new Error('redirect');
+
+const user = getUser();
+
+async function render() {
+  const [stats, studentData] = await Promise.all([
+    apiFetch('/stats'),
+    apiFetch('/students')
+  ]);
+
+  const firstName = user.name.split(' ')[0];
+  const hasWallet = !!user.stellar_address;
+
+  const walletBanner = hasWallet
+    ? `<div class="alert alert-info" style="margin-bottom:24px">
+        <i class="ti ti-wallet"></i>
+        <div>
+          <strong>Stellar wallet active.</strong> Disbursements will arrive in seconds.
+          <div style="margin-top:4px">${stellarChip(user.stellar_address, true)}</div>
+        </div>
+       </div>`
+    : `<div class="alert alert-warning" style="margin-bottom:24px">
+        <i class="ti ti-wallet"></i>
+        <div>
+          <strong>No Stellar wallet linked.</strong>
+          You won't receive disbursements until your wallet is linked.
+          <a href="/student/wallet" style="margin-left:8px;font-weight:500">Link wallet →</a>
+        </div>
+       </div>`;
+
+  const lastDisb = stats.recentDisbursements?.[0];
+
+  const recentRows = (stats.recentDisbursements || []).map(d => `
+    <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-weight:500;font-size:13.5px;color:var(--success)">+${formatUSDC(d.amount)} USDC</div>
+          <div style="font-size:12px;color:var(--text-muted)">${d.scholarship?.name || '—'} · ${d.purpose}</div>
+        </div>
+        <div style="text-align:right">
+          ${statusBadge(d.status)}
+          <div style="font-size:11px;color:var(--text-hint);margin-top:3px">${formatDate(d.disbursed_at)}</div>
+        </div>
+      </div>
+      ${d.stellar_tx_hash ? `<div style="margin-top:4px">${txHashChip(d.stellar_tx_hash)}</div>` : ''}
+    </div>
+  `).join('');
+
+  const steps = [
+    ['ti-wallet',       'Get a Stellar wallet',    'Download Freighter or LOBSTR and create an account.'],
+    ['ti-copy',         'Share your public key',   'Send your G... address to your scholarship coordinator.'],
+    ['ti-shield-check', 'Get whitelisted',         'Admin links your wallet to your account in ScholarPay.'],
+    ['ti-bolt',         'Receive instantly',        'Disbursements arrive in 3–5 seconds via USDC.'],
+  ];
+
+  const stepsHtml = steps.map(([icon, title, desc], i) => `
+    <div style="display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="width:30px;height:30px;background:var(--accent-bg);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px;font-weight:600;color:var(--accent)">${i+1}</div>
+      <div>
+        <div style="font-weight:500;font-size:13.5px">${title}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${desc}</div>
+      </div>
+    </div>
+  `).join('');
+
+  document.getElementById('app').innerHTML = pageShell('student', 'dashboard', `
+    <div class="page-header">
+      <h1 class="page-title">Welcome, ${firstName}!</h1>
+      <p class="page-subtitle">Your ScholarPay scholarship account overview.</p>
+    </div>
+
+    ${walletBanner}
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label"><i class="ti ti-cash"></i> Total Received</div>
+        <div class="stat-value usdc">${formatUSDC(stats.totalReceived || 0)}</div>
+        <div class="stat-sub">Confirmed on Stellar</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><i class="ti ti-send"></i> Disbursements</div>
+        <div class="stat-value">${stats.disbursementCount || 0}</div>
+        <div class="stat-sub">Confirmed payments</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><i class="ti ti-calendar"></i> Last Payment</div>
+        ${lastDisb
+          ? `<div class="stat-value" style="font-size:18px">${formatDate(lastDisb.disbursed_at)}</div>
+             <div class="stat-sub">${lastDisb.scholarship?.name || '—'}</div>`
+          : `<div class="stat-value" style="font-size:16px;color:var(--text-hint)">None yet</div>`}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recent Payments</span>
+          <a href="/student/disbursements" class="btn btn-sm btn-outline">View all</a>
+        </div>
+        ${(stats.recentDisbursements || []).length === 0
+          ? `<div class="empty-state"><div class="empty-icon"><i class="ti ti-cash"></i></div><p>No disbursements yet.</p></div>`
+          : recentRows}
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:14px">How to receive scholarships</div>
+        ${stepsHtml}
+        <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+          <a href="https://freighter.app" target="_blank" class="btn btn-sm btn-outline">
+            <i class="ti ti-external-link"></i> Freighter Wallet
+          </a>
+          <a href="https://lobstr.co" target="_blank" class="btn btn-sm btn-outline">
+            <i class="ti ti-external-link"></i> LOBSTR Wallet
+          </a>
+        </div>
+      </div>
+
+    </div>
+  `);
+}
+
+render().catch(e => showFlash(e.message, 'danger'));
+</script>
+</body>
+</html>
